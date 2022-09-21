@@ -1,0 +1,270 @@
+# frozen_string_literal: true
+
+require "shellwords"
+require "rake/testtask"
+
+require_relative "test/config"
+require_relative "test/support/config"
+
+def run_without_aborting(*tasks)
+  errors = []
+
+  tasks.each do |task|
+    Rake::Task[task].invoke
+  rescue Exception
+    errors << task
+  end
+
+  abort "Errors running #{errors.join(', ')}" if errors.any?
+end
+
+desc "Run mysql2, sqlite, and postgresql tests by default"
+task default: :test
+
+task :package
+
+desc "Run mysql2, sqlite, and postgresql tests"
+task :test do
+  tasks = defined?(JRUBY_VERSION) ?
+    %w(test_jdbcmysql test_jdbcsqlite3 test_jdbcpostgresql) :
+    %w(test_mysql2 test_sqlite3 test_postgresql)
+  run_without_aborting(*tasks)
+end
+
+namespace :test do
+  task :isolated do
+    tasks = defined?(JRUBY_VERSION) ?
+      %w(isolated_test_jdbcmysql isolated_test_jdbcsqlite3 isolated_test_jdbcpostgresql) :
+      %w(isolated_test_mysql2 isolated_test_sqlite3 isolated_test_postgresql)
+    run_without_aborting(*tasks)
+  end
+end
+
+namespace :db do
+  desc "Build MySQL and PostgreSQL test databases"
+  task create: ["db:mysql:build", "db:postgresql:build"]
+
+  desc "Drop MySQL and PostgreSQL test databases"
+  task drop: ["db:mysql:drop", "db:postgresql:drop"]
+end
+
+%w( mysql2 postgresql sqlite3 sqlite3_mem oracle jdbcmysql jdbcpostgresql jdbcsqlite3 jdbcderby jdbch2 jdbchsqldb ).each do |adapter|
+  namespace :test do
+    Rake::TestTask.new(adapter => "#{adapter}:env") do |t|
+      adapter_short = adapter[/^[a-z0-9]+/]
+      t.libs << "test"
+      t.test_files = (FileList["test/cases/**/*_test.rb"].reject {
+        |x| x.include?("/adapters/") || x.include?("/encryption/performance")
+      } + FileList["test/cases/adapters/#{adapter_short}/**/*_test.rb"])
+
+      t.warning = true
+      t.verbose = true
+      t.ruby_opts = ["--dev"] if defined?(JRUBY_VERSION)
+    end
+
+    namespace :integration do
+      # Active Job Integration Tests
+      namespace :active_job do
+        Rake::TestTask.new(adapter => "#{adapter}:env") do |t|
+          t.libs << "test"
+          t.test_files = FileList["test/activejob/*_test.rb"]
+          t.warning = true
+          t.verbose = true
+          t.ruby_opts = ["--dev"] if defined?(JRUBY_VERSION)
+        end
+      end
+    end
+
+    namespace :isolated do
+      task adapter => "#{adapter}:env" do
+        adapter_short = adapter[/^[a-z0-9]+/]
+        puts [adapter, adapter_short].inspect
+
+        dash_i = [
+          "test",
+          "lib",
+          "../activesupport/lib",
+          "../activemodel/lib"
+        ].map { |dir| File.expand_path(dir, __dir__) }
+
+        dash_i.reverse_each do |x|
+          $:.unshift(x) unless $:.include?(x)
+        end
+        $-w = true
+
+        require "bundler/setup" unless defined?(Bundler)
+
+        # Every test file loads "cases/helper" first, so doing it
+        # post-fork gains us nothing.
+
+        # We need to dance around minitest autorun, though.
+        require "minitest"
+        Minitest.instance_eval do
+          alias _original_autorun autorun
+          def autorun
+            # no-op
+          end
+          require "cases/helper"
+          alias autorun _original_autorun
+        end
+
+        failing_files = []
+
+        test_options = ENV["TESTOPTS"].to_s.split(/[\s]+/)
+
+        test_files = (Dir["test/cases/**/*_test.rb"].reject {
+          |x| x.include?("/adapters/") || x.include?("/encryption/performance")
+        } + Dir["test/cases/adapters/#{adapter_short}/**/*_test.rb"]).sort
+
+        if ENV["BUILDKITE_PARALLEL_JOB_COUNT"]
+          n = ENV["BUILDKITE_PARALLEL_JOB"].to_i
+          m = ENV["BUILDKITE_PARALLEL_JOB_COUNT"].to_i
+
+          test_files = test_files.each_slice(m).filter_map { |slice| slice[n] }
+        end
+
+        test_files.each do |file|
+          puts "--- #{file}"
+          fake_command = Shellwords.join([
+            FileUtils::RUBY,
+            "-w",
+            *dash_i.map { |dir| "-I#{Pathname.new(dir).relative_path_from(Pathname.pwd)}" },
+            file,
+          ])
+          puts fake_command
+
+          # We could run these in parallel, but pretty much all of the
+          # railties tests already run in parallel, so ¯\_(⊙︿⊙)_/¯
+          Process.waitpid fork {
+            ARGV.clear.concat test_options
+            Rake.application = nil
+
+            Minitest.autorun
+
+            load file
+          }
+
+          unless $?.success?
+            failing_files << file
+            puts "^^^ +++"
+          end
+          puts
+        end
+
+        puts "--- All tests completed"
+        unless failing_files.empty?
+          puts "^^^ +++"
+          puts
+          puts "Failed in:"
+          failing_files.each do |file|
+            puts "  #{file}"
+          end
+          puts
+
+          exit 1
+        end
+      end
+    end
+
+    namespace :encryption do
+      namespace :performance do
+        Rake::TestTask.new(adapter => "#{adapter}:env") do |t|
+          t.description = "Encryption performance tests for #{adapter}"
+          t.libs << "test"
+          t.test_files = FileList["test/cases/encryption/performance/*_test.rb"]
+
+          t.warning = true
+          t.verbose = true
+          t.ruby_opts = ["--dev"] if defined?(JRUBY_VERSION)
+        end
+      end
+    end
+  end
+
+  namespace adapter do
+    task test: "test_#{adapter}"
+    task isolated_test: "isolated_test_#{adapter}"
+
+    # Set the connection environment for the adapter
+    task(:env) { ENV["ARCONN"] = adapter }
+  end
+
+  # Make sure the adapter test evaluates the env setting task
+  task "test_#{adapter}" => ["#{adapter}:env", "test:#{adapter}", "test:integration:active_job:#{adapter}"]
+  task "isolated_test_#{adapter}" => ["#{adapter}:env", "test:isolated:#{adapter}"]
+end
+
+namespace :db do
+  namespace :mysql do
+    connection_arguments = lambda do |connection_name|
+      config = ARTest.config["connections"]["mysql2"][connection_name]
+      ["--user=#{config["username"]}", ("--password=#{config["password"]}" if config["password"]), ("--host=#{config["host"]}" if config["host"]), ("--socket=#{config["socket"]}" if config["socket"])].join(" ")
+    end
+
+    desc "Create the MySQL Rails User"
+    task :build_user do
+      if ENV["MYSQL_CODESPACES"]
+        mysql_command = "sudo mysql -uroot -proot -e"
+      else
+        mysql_command = "mysql -uroot -e"
+      end
+
+      config = ARTest.config["connections"]["mysql2"]
+      %x( #{mysql_command} "CREATE USER IF NOT EXISTS '#{config["arunit"]["username"]}'@'localhost';" )
+      %x( #{mysql_command} "CREATE USER IF NOT EXISTS '#{config["arunit2"]["username"]}'@'localhost';" )
+      %x( #{mysql_command} "GRANT ALL PRIVILEGES ON #{config["arunit"]["database"]}.* to '#{config["arunit"]["username"]}'@'localhost'" )
+      %x( #{mysql_command} "GRANT ALL PRIVILEGES ON #{config["arunit2"]["database"]}.* to '#{config["arunit2"]["username"]}'@'localhost'" )
+      %x( #{mysql_command} "GRANT ALL PRIVILEGES ON inexistent_activerecord_unittest.* to '#{config["arunit"]["username"]}'@'localhost';" )
+    end
+
+    desc "Build the MySQL test databases"
+    task build: ["db:mysql:build_user"] do
+      config = ARTest.config["connections"]["mysql2"]
+      %x( mysql #{connection_arguments["arunit"]} -e "create DATABASE #{config["arunit"]["database"]} DEFAULT CHARACTER SET utf8mb4" )
+      %x( mysql #{connection_arguments["arunit2"]} -e "create DATABASE #{config["arunit2"]["database"]} DEFAULT CHARACTER SET utf8mb4" )
+    end
+
+    desc "Drop the MySQL test databases"
+    task :drop do
+      config = ARTest.config["connections"]["mysql2"]
+      %x( mysqladmin #{connection_arguments["arunit"]} -f drop #{config["arunit"]["database"]} )
+      %x( mysqladmin #{connection_arguments["arunit2"]} -f drop #{config["arunit2"]["database"]} )
+    end
+
+    desc "Rebuild the MySQL test databases"
+    task rebuild: [:drop, :build]
+  end
+
+  namespace :postgresql do
+    desc "Build the PostgreSQL test databases"
+    task :build do
+      config = ARTest.config["connections"]["postgresql"]
+      %x( createdb -E UTF8 -T template0 #{config["arunit"]["database"]} --lc-collate en_US.UTF-8 )
+      %x( createdb -E UTF8 -T template0 #{config["arunit2"]["database"]} --lc-collate en_US.UTF-8 )
+    end
+
+    desc "Drop the PostgreSQL test databases"
+    task :drop do
+      config = ARTest.config["connections"]["postgresql"]
+      %x( dropdb --if-exists #{config["arunit"]["database"]} )
+      %x( dropdb --if-exists #{config["arunit2"]["database"]} )
+    end
+
+    desc "Rebuild the PostgreSQL test databases"
+    task rebuild: [:drop, :build]
+  end
+end
+
+task build_mysql_databases: "db:mysql:build"
+task drop_mysql_databases: "db:mysql:drop"
+task rebuild_mysql_databases: "db:mysql:rebuild"
+
+task build_postgresql_databases: "db:postgresql:build"
+task drop_postgresql_databases: "db:postgresql:drop"
+task rebuild_postgresql_databases: "db:postgresql:rebuild"
+
+task :lines do
+  load File.expand_path("../tools/line_statistics", __dir__)
+  files = FileList["lib/active_record/**/*.rb"]
+  CodeTools::LineStatistics.new(files).print_loc
+end

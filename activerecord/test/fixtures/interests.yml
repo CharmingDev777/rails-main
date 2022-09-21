@@ -1,0 +1,33 @@
+trainspotting:
+  topic: Trainspotting
+  zine: staying_in
+  human: gordon
+
+birdwatching:
+  topic: Birdwatching
+  zine: staying_in
+  human: gordon
+
+stamp_collecting:
+  topic: Stamp Collecting
+  zine: staying_in
+  human: gordon
+
+hunting:
+  topic: Hunting
+  zine: going_out
+  human: steve
+
+woodsmanship:
+  topic: Woodsmanship
+  zine: going_out
+  human: steve
+
+survival:
+  topic: Survival
+  zine: going_out
+  human: steve
+
+llama_wrangling:
+  topic: Llama Wrangling
+  polymorphic_human: gordon (Human)

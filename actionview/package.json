@@ -1,0 +1,39 @@
+{
+  "name": "@rails/ujs",
+  "version": "7.1.0-alpha",
+  "description": "Ruby on Rails unobtrusive scripting adapter",
+  "main": "app/assets/javascripts/rails-ujs.js",
+  "module": "app/assets/javascripts/rails-ujs.esm.js",
+  "files": [
+    "app/assets/javascripts/*.js"
+  ],
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "build": "rollup --config rollup.config.js",
+    "test": "echo \"See the README: https://github.com/rails/rails/blob/main/actionview/app/assets/javascripts#how-to-run-tests\" && exit 1",
+    "lint": "eslint app/javascript"
+  },
+  "repository": {
+    "type": "git",
+    "url": "rails/rails"
+  },
+  "contributors": [
+    "Stephen St. Martin",
+    "Steve Schwartz",
+    "Dangyi Liu",
+    "All contributors"
+  ],
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/rails/rails/issues"
+  },
+  "homepage": "https://rubyonrails.org/",
+  "devDependencies": {
+    "eslint": "^4.19.1",
+    "eslint-plugin-import": "^2.23.4",
+    "rollup": "^2.53.3",
+    "rollup-plugin-terser": "^7.0.2"
+  }
+}
